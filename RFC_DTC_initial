@@ -1,0 +1,196 @@
+import PySimpleGUI as sg
+import joblib
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils import shuffle
+
+# pandas deprecation nonsense
+pd.set_option('future.no_silent_downcasting', True)
+
+df = pd.read_csv("datasets/dataset.csv")
+df = shuffle(df, random_state=42)
+
+# remove the hyphen in all the strings
+
+for col in df.columns:
+    df[col] = df[col].str.replace("_", " ")
+
+# Check the dataset for any NaN values
+null_checker = df.apply(lambda x: sum(x.isnull())).to_frame(name="count")
+
+# remove all whitespace in the dataset
+
+cols = df.columns
+data = df[cols].values.flatten()
+
+s = pd.Series(data)
+s = s.str.strip()
+s = s.values.reshape(df.shape)
+
+df = pd.DataFrame(s, columns=df.columns)
+
+# Replace all NaN values with int(0)
+
+df = df.fillna(0)
+
+# edit: I love pandas so much it actually makes things so easy my god this would have taken like 7 lines otherwise
+# Ranking symptom severity
+
+df1 = pd.read_csv("datasets/Symptom-severity.csv")
+df1["Symptom"] = df1["Symptom"].str.replace("_", " ")
+
+# encode the symptom ranking within the other dataset (put the rank that applies to each symptom WITH each symptom)
+vals = df.values
+symptoms = df1["Symptom"].unique()
+
+for i in range(len(symptoms)):
+    vals[vals == symptoms[i]] = df1[df1['Symptom'] == symptoms[i]]['weight'].values[0]
+
+d = pd.DataFrame(vals, columns=cols)
+
+# for the symptoms that don't have a severity rank, make them 0 (hardcoded)
+
+d = d.replace('dischromic  patches', 0)
+d = d.replace('spotting  urination', 0)
+df = d.replace('foul smell of urine', 0)
+
+# check if whole columns are blank, i.e. droppable
+
+null_checker = df.apply(lambda x: sum(x.isnull())).to_frame(name='count')
+
+# Get all the disease names and set data = to all the symptoms and labels = to all the disease names
+
+data = df.iloc[:, 1:].values
+labels = df['Disease'].values
+
+# Time to make the actual AI! Cleaning is done. Splitting the dataset into training and testing
+
+x_train, x_test, y_train, y_test = train_test_split(data, labels, train_size=0.8, random_state=42)
+print(x_train.shape, x_test.shape, y_train.shape, y_test.shape)
+
+# Edit: Once again, I love sklearn and pandas so much
+# Anyways... making the Decision Tree classifier
+
+tree = DecisionTreeClassifier(criterion='gini', random_state=42, max_depth=13)
+tree.fit(x_train, y_train)
+preds = tree.predict(x_test)
+
+kfold = KFold(n_splits=10, shuffle=True, random_state=42)
+DS_train = cross_val_score(tree, x_train, y_train, cv=kfold, scoring='accuracy')
+pd.DataFrame(DS_train, columns=['Scores'])
+
+kfold = KFold(n_splits=10, shuffle=True, random_state=42)
+DS_test = cross_val_score(tree, x_test, y_test, cv=kfold, scoring='accuracy')
+pd.DataFrame(DS_test, columns=['Scores'])
+
+# Making the Random Forest Classifier
+
+rfc = RandomForestClassifier(random_state=42)
+rnd_forest = RandomForestClassifier(random_state=42, max_features='sqrt', n_estimators=500, max_depth=13)
+rnd_forest.fit(x_train, y_train)
+preds = rnd_forest.predict(x_test)
+
+kfold = KFold(n_splits=10, shuffle=True, random_state=42)
+rnd_forest_train = cross_val_score(rnd_forest, x_train, y_train, cv=kfold, scoring='accuracy')
+pd.DataFrame(rnd_forest_train, columns=['Scores'])
+
+kfold = KFold(n_splits=10, shuffle=True, random_state=42)
+rnd_forest_test = cross_val_score(rnd_forest, x_test, y_test, cv=kfold, scoring='accuracy')
+pd.DataFrame(rnd_forest_test, columns=['Scores'])
+
+# As an aside, everything with "kfold" is evaluating model performance. This is important for lost/cost functions
+# Finishing model: After model makes prediction, show disease description and precautions to take.
+
+disease_description = pd.read_csv("datasets/symptom_Description.csv")
+sym_precaution = pd.read_csv("datasets/symptom_precaution.csv")
+
+# Saving the models so that they can be used for prediction:
+# joblib.dump(rfc, "/scratches/random_forest.joblib" <-- no longer needed, model is trained.
+# Load randon forest classifier:
+# joblib.dump(tree, "C:/Users/ergop/AppData/Roaming/JetBrains/PyCharmCE2023.1/scratches/decision_tree.joblib")
+
+loaded_rf = joblib.load("random_forest.joblib")
+loaded_dt = joblib.load("decision_tree.joblib")
+
+
+# function to use the model
+
+def predd(x, sym_list=[]):
+    psymptoms = []  # Initialize psymptoms list
+    for symptom in sym_list:
+        psymptoms.append(symptom)
+
+    # Map symptoms to weights
+    a = np.array(df1["Symptom"])
+    b = np.array(df1["weight"])
+    for j in range(len(psymptoms)):
+        for k in range(len(a)):
+            if psymptoms[j] == a[k]:
+                psymptoms[j] = b[k]
+
+    # Predict disease based on symptoms
+    psy = [psymptoms]
+    pred2 = x.predict(psy)
+
+    # Retrieve disease description
+    disp = disease_description[disease_description['Disease'] == pred2[0]]
+    disp = disp.values[0][1]
+
+    # Retrieve recommendations for the predicted disease
+    recomnd = sym_precaution[sym_precaution['Disease'] == pred2[0]]
+    c = np.where(sym_precaution['Disease'] == pred2[0])[0][0]
+    precaution_list = []
+    for i in range(1, len(sym_precaution.iloc[c])):
+        precaution_list.append(sym_precaution.iloc[c, i])
+
+    # Return results as a dictionary
+    result = "Disease Name: {}\n Disease Description: " \
+             "{}\n Recommended Things to do at home: {}".format(pred2[0], disp, precaution_list)
+
+    return result
+
+
+symptom_list = df1["Symptom"].to_list()
+symptom_array = []
+
+layout = [
+    [sg.Text("This is my Capstone project: an AI.")],
+    [sg.Text("Input your symptoms here:"), sg.Input(enable_events=True, key="-SYMPTOM-")],
+    [sg.Listbox(values=[], size=(30, 6), key="-FILTERED-CHOICES-", enable_events=True)],
+    [sg.Button("Close")],
+    [sg.Text("Your Symptoms:", size=(40, 10)), sg.Listbox(values=symptom_array, size=(20, 6), key="-USER-SYMPTOMS-")],
+    [sg.Button("Determine Sickness", k="-DISEASE-", enable_events=True), sg.Text("", key="-OUTPUT-")],
+]
+
+window = sg.Window('Capstone', layout, finalize=True)
+input_box = window["-SYMPTOM-"]
+filtered_choices = window["-FILTERED-CHOICES-"]
+user_symptoms_listbox = window["-USER-SYMPTOMS-"]
+output_box = window["-OUTPUT-"]
+
+while True:
+    event, values = window.read()
+    if event == sg.WIN_CLOSED or event == "Close":
+        break
+    elif event == '-SYMPTOM-':
+        entry = values['-SYMPTOM-'].lower()
+        filtered_items = [item for item in symptom_list if item.lower().startswith(entry)]
+        filtered_choices.update(values=filtered_items)
+    elif event == '-FILTERED-CHOICES-' and len(values['-FILTERED-CHOICES-']):
+        if sg.popup_yes_no('Do you want to add this symptom?') == 'Yes':
+            selected_item = values['-FILTERED-CHOICES-'][0]
+            symptom_array.append(selected_item)
+            user_symptoms_listbox.update(values=symptom_array)
+            values["-SYMPTOM-"] = ""
+    elif event == "-DISEASE-":
+        if len(symptom_array) < 17:
+            for i in range(0, 17-len(symptom_array)):
+                symptom_array.append(0)
+        results = predd(rnd_forest, symptom_array)
+        output_box.update(results)
+
+
+window.close()
